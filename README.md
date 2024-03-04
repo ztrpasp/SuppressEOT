@@ -15,12 +15,15 @@
 
 Existing text-to-image models can encounter challenges in effectively suppressing the generation of the negative target. For example, when requesting an image using the prompt "a face without glasses",  the diffusion models (i.e., SD) synthesize the subject without "glasses", as shown in Figure (the first column).  However, when using the prompt "a man without glasses", both SD and DeepFloyd-IF models still generate the subject with "glasses" (It also happens in both *Ideogram* and *Mijourney* models, see Appendix F),  as shown in Figure (the second and fifth columns).   Figure (the last column) quantitatively show that SD has 0.819 *DetScore* for "glasses" using 1000 randomly generated images, indicating a very common failure cases in diffusion models.  Also, when giving the prompt "a man", often the glasses are included, see Figure (the third and sixth columns).  
 
-## 🛠️ Method Overview
-<span id="method-overview"></span>
+[//]: # (## 🛠️ Method Overview)
 
-![Random Sample](./docs/overview.jpg)
+[//]: # (<span id="method-overview"></span>)
 
-Overview of the proposed method. (a) We devise  a negative target embedding matrix $\boldsymbol\chi$: $\boldsymbol\chi = [\boldsymbol{c}^{NE},\boldsymbol{c}^{EOT}\_0, \cdots, \boldsymbol{c}^{EOT}\_{N-{|\boldsymbol{p}|-2}}]$.  We perform SVD for the embedding matrix $\boldsymbol\chi=\textbf{\emph{U}}{\boldsymbol\Sigma}{\textbf{\emph{V}}}^T$. We introduce a soft-weight regularization (SWR) for each largest eigenvalue. Then  we recover the embedding matrix $\hat{\boldsymbol\chi}=\textbf{\emph{U}}{\hat{\boldsymbol\Sigma}}{\textbf{\emph{V}}}^T$. (b) We propose inference-time text embedding optimization (ITO).  We align the attention maps of both $\boldsymbol{c}^{PE}$ and  $\boldsymbol{\hat{c}}^{PE}$, and widen  the ones of  both $\boldsymbol{c}^{NE}$ and $\boldsymbol{\hat{c}}^{NE}$.
+[//]: # ()
+[//]: # (![Random Sample]&#40;./docs/overview.jpg&#41;)
+
+[//]: # ()
+[//]: # (Overview of the proposed method. &#40;a&#41; We devise  a negative target embedding matrix $\boldsymbol\chi$: $\boldsymbol\chi = [\boldsymbol{c}^{NE},\boldsymbol{c}^{EOT}\_0, \cdots, \boldsymbol{c}^{EOT}\_{N-{|\boldsymbol{p}|-2}}]$.  We perform SVD for the embedding matrix $\boldsymbol\chi=\textbf{\emph{U}}{\boldsymbol\Sigma}{\textbf{\emph{V}}}^T$. We introduce a soft-weight regularization &#40;SWR&#41; for each largest eigenvalue. Then  we recover the embedding matrix $\hat{\boldsymbol\chi}=\textbf{\emph{U}}{\hat{\boldsymbol\Sigma}}{\textbf{\emph{V}}}^T$. &#40;b&#41; We propose inference-time text embedding optimization &#40;ITO&#41;.  We align the attention maps of both $\boldsymbol{c}^{PE}$ and  $\boldsymbol{\hat{c}}^{PE}$, and widen  the ones of  both $\boldsymbol{c}^{NE}$ and $\boldsymbol{\hat{c}}^{NE}$.)
 
 ## 💻 Requirements
 The codebase is tested on 
@@ -43,7 +46,7 @@ python suppress_eot_w_nulltext.py  --type Real-Image \
                                    --token_indices "[[4,5],[7],[9,10],]" \
                                    --alpha "[1.,]" --cross_retain_steps "[.2,]"
 ```
-![Random Sample](./docs/supresseot_results.png)
+![Random Sample](./docs/supresseot_results.jpg)
 
 You can use **NPI** ([Negative-prompt Inversion](https://arxiv.org/abs/2305.16807)) for faster inversion of the real image, but it may lead to a certain degree of degradation in editing quality:
 ```shell
@@ -100,6 +103,21 @@ python suppress_eot_w_nulltext.py  --type Real-Image \
 ```
 ![Random Sample](./docs/replacing_subjects.jpg)
 
+### 4️⃣ (Top) Cracks removal results. (Middle) Rain removal for synthetic rainy image. (Bottom) Rain removal for real-world rainy image
+
+```
+python suppress_eot_w_nulltext.py  --type Real-Image \
+                                   --prompt "A photo with cracks" \
+                                   --image_path "./example_images/A photo with cracks.jpg" \
+                                   --token_indices "[[4],]" \
+                                   --alpha "[1,]" --cross_retain_steps "[.5,]"
+```
+![Random Sample](./docs/additional_apps.jpg)
+
+
+## ⚗️Work in progress
+
+![Random Sample](./docs/work_in_progress.jpg)
 
 ## 📐 Quantitative comparison
 Following [Inst-Inpaint](https://arxiv.org/abs/2304.03246), we use FID and CLIP Accuracy to evaluate the accuracy of the removal operation on the GQA-Inpaint dataset. We achieve superior suppression results and higher CLIP
@@ -127,6 +145,11 @@ Outputs for GQA-Inpaint in [Inst-Inpaint](https://drive.google.com/file/d/1xBKNE
 
 ### Contact
 Should you have any questions, please contact senmaonk@gmail.com
+
+### License
+The code in this repository is licensed under the MIT License for academic and other non-commercial uses.
+
+[//]: # (For commercial use of the code and models, separate commercial licensing is available. Please contact authors.)
 
 ![visitors](https://visitor-badge.laobi.icu/badge?page_id=sen-mao/SuppressEOT)
 
