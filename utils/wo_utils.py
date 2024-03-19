@@ -5,12 +5,13 @@ from scipy.spatial.distance import cdist
 
 CALC_SIMILARITY = False
 
+
 def punish_wight(wo_batch, latent_size, alpha, method):
     if method == 'weight':
         wo_batch *= alpha
     elif method in ['alpha', 'beta', 'delete', 'soft-weight']:
         u, s, vh = torch.linalg.svd(wo_batch)
-        u = u[:,:latent_size]
+        u = u[:, :latent_size]
         zero_idx = int(latent_size * alpha)
         if method == 'alpha':
             s[:zero_idx] = 0
@@ -37,6 +38,7 @@ def punish_wight(wo_batch, latent_size, alpha, method):
         raise ValueError('Unsupported method')
     return wo_batch
 
+
 def woword_eot_context(context, token_indices, alpha, method, n):
     for i, batch in enumerate(context):
         indices = token_indices + [num for num in range(n-1, 77)]
@@ -44,6 +46,7 @@ def woword_eot_context(context, token_indices, alpha, method, n):
         wo_batch = punish_wight(wo_batch.T, len(indices), alpha, method).T
         batch[indices] = wo_batch
     return context
+
 
 def woword_reweight(attn, token_indices, alpha):
     # if attn.shape[1] > 32 ** 2:  # avoid memory overhead

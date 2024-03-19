@@ -1,4 +1,3 @@
-
 from typing import Optional, List
 from tqdm import tqdm
 import torch
@@ -10,16 +9,18 @@ from PIL import Image
 import os
 import argparse
 import ast
+import os
 
 from utils import ptp_utils, wo_utils
 from utils.null_text_inversion import NullInversion
 from losses.attn_loss import AttnLoss
 
+# 设置扩散模型的调度器，定义了如何在扩散过程中调整噪声水平，包括起始和结束的beta值，以及beta值随步骤变化的调度方式。
 scheduler = DDIMScheduler(beta_start=0.00085, beta_end=0.012, beta_schedule="scaled_linear", clip_sample=False, set_alpha_to_one=False, steps_offset=1)
 LOW_RESOURCE = True
-NUM_DDIM_STEPS = 50
-GUIDANCE_SCALE = 7.5
-MAX_NUM_WORDS = 77
+NUM_DDIM_STEPS = 50  # 指定在扩散过程中使用的步骤数量，决定了生成图像的细节程度和质量
+GUIDANCE_SCALE = 7.5  # 控制引导扩散的强度，影响生成图像与文本提示的相关性
+MAX_NUM_WORDS = 77  # 限制文本提示中词汇的最大数量
 
 
 class EmptyControl:
@@ -33,40 +34,51 @@ class EmptyControl:
     def __call__(self, attn, is_cross: bool, place_in_unet: str):
         return attn
 
+# 抽象基类，在图像生成过程中修改和控制模型的注意力矩阵
 class AttentionControl(abc.ABC):
 
+    # 在每一步生成之后调用的回调函数
     def step_callback(self, x_t):
         return x_t
 
+    # 在每一步生成之间调用的函数
     def between_steps(self):
         return
 
+    # 属性装饰器，返回无条件注意力层数，如果是低资源模式，则使用所有注意力层，否则为0
     @property
     def num_uncond_att_layers(self):
         return self.num_att_layers if LOW_RESOURCE else 0
 
+    # 抽象方法，定义了如何处理注意力矩阵
     @abc.abstractmethod
     def forward(self, attn, is_cross: bool, place_in_unet: str):
         raise NotImplementedError
 
+    # __call__使得实例可以像函数一样被调用，根据当前注意力层的状态处理注意力矩阵
     def __call__(self, attn, is_cross: bool, place_in_unet: str):
+        # 如果当前的注意力层大于等于无条件注意力层的数量，则对注意力矩阵进行处理
         if self.cur_att_layer >= self.num_uncond_att_layers:
+            # 调用forward方法处理注意力矩阵，根据是否是交叉注意力、所处的Unet位置进行特定处理
             if LOW_RESOURCE:
                 attn = self.forward(attn, is_cross, place_in_unet)
             else:
                 h = attn.shape[0]
                 attn[h // 2:] = self.forward(attn[h // 2:], is_cross, place_in_unet)
         self.cur_att_layer += 1
+        # 当当前的注意力层计数达到总的注意力层次数时
         if self.cur_att_layer == self.num_att_layers + self.num_uncond_att_layers:
             self.cur_att_layer = 0
             self.cur_step += 1
             self.between_steps()
         return attn
 
+    # 重置函数，用于重新开始一个生成过程前重置当前步骤和当前注意力层的状态
     def reset(self):
         self.cur_step = 0
         self.cur_att_layer = 0
 
+    # 初始化函数，设置当前步骤和当前注意力层为0，注意力层数量为 - 1（待指定）
     def __init__(self):
         self.cur_step = 0
         self.num_att_layers = -1
@@ -87,21 +99,26 @@ class SpatialReplace(EmptyControl):
 
 
 class AttentionStore(AttentionControl):
-
+    # "down_cross"、"mid_cross"、"up_cross"代表在U-Net架构的下采样、中间层、上采样阶段收集的交叉注意力矩阵，
+    # "down_self"、"mid_self"、"up_self"则分别代表这三个阶段收集的自注意力矩阵。
     @staticmethod
     def get_empty_store():
         return {"down_cross": [], "mid_cross": [], "up_cross": [],
                 "down_self": [], "mid_self": [], "up_self": []}
 
+    # 实现了如何处理注意力矩阵的逻辑，这里简单地存储下来，避免内存开销过大
     def forward(self, attn, is_cross: bool, place_in_unet: str):
         key = f"{place_in_unet}_{'cross' if is_cross else 'self'}"
         if attn.shape[1] <= 32 ** 2:  # avoid memory overhead
-            self.step_store[key].append(attn)
+            self.step_store[key].append(attn)  # 收集不同类型的注意力矩阵
         return attn
 
+    # 在每一步生成之间调用，用于更新注意力存储
     def between_steps(self):
+        # 如果attention_store为空，直接使用当前步骤的step_store来初始化
         if len(self.attention_store) == 0:
             self.attention_store = self.step_store
+        # 遍历每个键值对，将step_store中收集的当前步骤的注意力矩阵累加到attention_store中相应的累积值上。这样做是为了跨不同生成步骤累积注意力矩阵的信息，以便进行后续分析或调整
         else:
             for key in self.attention_store:
                 for i in range(len(self.attention_store[key])):
@@ -121,6 +138,7 @@ class AttentionStore(AttentionControl):
     def __init__(self, token_indices: List[int], alpha: float, method: str, cross_retain_steps: float, n: int, iter_each_step: int, max_step_to_erase: int,
                  lambda_retain=1, lambda_erase=-.5, lambda_self_retain=1, lambda_self_erase=-.5):
         super(AttentionStore, self).__init__()
+        # 初始化存储注意力矩阵的结构，以及其它控制参数
         self.step_store = self.get_empty_store()
         self.attention_store = {}
         self.baseline = True
@@ -136,7 +154,7 @@ class AttentionStore(AttentionControl):
         self.text_embeddings_erase = None
         self.iter_each_step = iter_each_step
         self.MAX_STEP_TO_ERASE = max_step_to_erase
-        # lambds of loss
+        # lambdas of loss
         self.lambda_retain = lambda_retain
         self.lambda_erase = lambda_erase
         self.lambda_self_retain = lambda_self_retain
@@ -226,6 +244,7 @@ def text2image_ldm_stable(
         truncation=True,
         return_tensors="pt",
     )
+    # 得到文本嵌入
     text_embeddings = model.text_encoder(text_input.input_ids.to(model.device))[0]
     max_length = text_input.input_ids.shape[-1]
     if uncond_embeddings is None:
@@ -236,11 +255,13 @@ def text2image_ldm_stable(
         uncond_embeddings_ = None
         scale = 5
 
+    # 初始化潜在向量
     latent, _ = ptp_utils.init_latent(latent, model, height, width, generator, batch_size)
 
     _latent, _latent_erase = latent.clone().to(model.device), latent.clone().to(model.device)
     latents = torch.cat([_latent, _latent_erase])
 
+    # 注意力损失函数 n是输入的文本嵌入（不含EOT）长度
     attn_loss_func = AttnLoss(model.device, 'cosine', controller.n, controller.token_indices,
                               controller.lambda_retain, controller.lambda_erase, controller.lambda_self_retain, controller.lambda_self_erase)
 
@@ -248,6 +269,7 @@ def text2image_ldm_stable(
     # text embedding for erasing
     controller.text_embeddings_erase = text_embeddings.clone()
 
+    # scale_range定义了一个范围，用于在生成过程中动态调整某些参数
     scale_range = np.linspace(1., .1, len(model.scheduler.timesteps))
     pbar = tqdm(model.scheduler.timesteps[-start_time:], desc='Suppress EOT', ncols=100, colour="red")
     for i, t in enumerate(pbar):
@@ -255,6 +277,7 @@ def text2image_ldm_stable(
             context = torch.cat([uncond_embeddings[i].expand(*text_embeddings.shape), text_embeddings])
             if LOW_RESOURCE:
                 context = (uncond_embeddings[i].expand(*text_embeddings.shape), text_embeddings)
+        # 整合了无条件和条件文本嵌入，用于引导生成过程
         else:
             context = torch.cat([uncond_embeddings_, text_embeddings])
             if LOW_RESOURCE:
@@ -262,7 +285,7 @@ def text2image_ldm_stable(
         controller.i = i
 
         # conditional branch: erase content for text embeddings
-        if controller.i >= controller.cross_retain_steps:
+        if controller.i >= controller.cross_retain_steps:  # 这里执行软加权正则化
             controller.text_embeddings_erase = \
                 wo_utils.woword_eot_context(text_embeddings.clone(), controller.token_indices, controller.alpha,
                                             controller.method, controller.n)
@@ -271,9 +294,12 @@ def text2image_ldm_stable(
         if controller.MAX_STEP_TO_ERASE > controller.i >= controller.cross_retain_steps and not (controller.text_embeddings_erase == text_embeddings).all() and \
                 (attn_loss_func.lambda_retain or attn_loss_func.lambda_erase or attn_loss_func.lambda_self_retain or attn_loss_func.lambda_self_erase):
             controller.uncond = False
+            # 设置当前注意力层，跳过无条件注意力层
             controller.cur_att_layer = 32  # w=1, skip unconditional branch
             controller.attention_store = {}
+            # 生成带有文本嵌入（未经过软加权正则化）的噪声预测样本
             noise_prediction_text = model.unet(_latent, t, encoder_hidden_states=text_embeddings)["sample"]
+            # 计算当前的注意力图，用于分析哪些内容需要保留或擦除
             attention_maps = aggregate_attention(controller, 16, ["up", "down"], is_cross=True)
             self_attention_maps = aggregate_attention(controller, 16, ["up", "down", "mid"], is_cross=False)
 
@@ -287,8 +313,10 @@ def text2image_ldm_stable(
                     # conditional branch
                     text_embeddings_erase = controller.text_embeddings_erase.clone().detach().requires_grad_(True)
                     # forward pass of conditional branch with text_embeddings_erase
+                    # 生成带有文本嵌入（经过软加权正则化）的噪声预测样本
                     noise_prediction_text = model.unet(_latent_erase, t, encoder_hidden_states=text_embeddings_erase)["sample"]
                     model.unet.zero_grad()
+                    # 经过软加权正则化后的注意力图，用于与原始注意力图进行比较，优化擦除策略
                     attention_maps_erase = aggregate_attention(controller, 16, ["up", "down", "mid"], is_cross=True)
                     self_attention_maps_erase = aggregate_attention(controller, 16, ["up", "down", "mid"], is_cross=False)
 
@@ -307,9 +335,13 @@ def text2image_ldm_stable(
         context_erase = (uncond_embeddings[i].expand(*text_embeddings.shape), controller.text_embeddings_erase) \
             if uncond_embeddings_ is None else (uncond_embeddings_, controller.text_embeddings_erase)
         controller.attention_store = {}
-        controller.baseline = False
+        controller.baseline = False  # 关闭baseline模式
+        # 结合无条件和条件文本嵌入，创建新的上下文
+        # 这里创建了一个新的、更大的上下文张量。这个操作的目的是在单个扩散步骤中同时考虑这两组信息
+        # 组合原始上下文和擦除上下文允许模型在执行扩散步骤时，同时考虑到保持某些特征不变（原始上下文）和修改或擦除特定特征（擦除上下文）的需求。
         contexts = [torch.cat([context[0], context_erase[0]]), torch.cat([context[1], context_erase[1]])]
         latents = ptp_utils.diffusion_step(model, controller, latents, contexts, t, guidance_scale, low_resource=LOW_RESOURCE)
+        # 分别获取保留和擦除操作后的潜在向量
         _latent, _latent_erase = latents
         _latent, _latent_erase = _latent.unsqueeze(0), _latent_erase.unsqueeze(0)
 
@@ -365,11 +397,17 @@ def parse_args():
     parser.add_argument('--seed', type=int, default=2, help='seed for generated image of stable diffusion')
     parser.add_argument('--prompt', type=str, default='A man with a beard wearing glasses and a hat in blue shirt', help='prompt for generated or real image')
     parser.add_argument('--image_path', type=str, default='./example_images/A man with a beard wearing glasses and a hat in blue shirt.jpg', help='image path')
+    # 排除的词的索引
     parser.add_argument('--token_indices', type=ast.literal_eval, default='[[4,5],[7],[9,10]]', help='index for without word')  # List[int]
+    # 定义在超过多少步骤后执行"wo"惩罚，用于控制生成过程的精细程度，默认值为0.2，这意味着在生成过程的前20%步骤中，模型将正常生成图像，而在之后的步骤中，将开始尝试抑制特定内容。
     parser.add_argument('--cross_retain_steps', type=ast.literal_eval, default='[.2,]', help='perform the "wo" punish when step >= cross_wo_steps')  # .0 == τ=1.0, .1 == τ=0.9, .2 == τ=0.8
+    # 惩罚比率，用于调整内容的保留或抑制程度，默认为1.0，更高的值意味着更强的抑制效果
     parser.add_argument('--alpha', type=ast.literal_eval, default='[1.,]', help="punishment ratio")
+    # 定义在扩散模型的最大步骤数进行内容抑制，默认为20
     parser.add_argument('--max_step_to_erase', type=int, default=20, help='erase/suppress max step of diffusion model')
+    # 定义每个步骤更新文本嵌入的迭代次数，默认为10
     parser.add_argument('--iter_each_step', type=int, default=10, help="the number of iteration for each step to update text embedding")
+    # 添加关于注意力保留和删除损失的λ值的参数，用于微调模型对特定内容的处理方式
     parser.add_argument('--lambda_retain', type=float, default=1., help='lambda for cross attention retain loss')
     parser.add_argument('--lambda_erase', type=float, default=-.5, help='lambda for cross attention erase loss')
     parser.add_argument('--lambda_self_retain', type=float, default=1., help='lambda for self attention retain loss')
@@ -432,16 +470,19 @@ def main_gen(args, stable):
 
     n = len(stable.tokenizer.encode(args.prompt))
 
-    outdir = f'suppress_eot_results_gen/{prompt}/seed{args.seed}'
+    outdir = f'/data/zwd/suppress_eot_results_gen/{prompt}/seed{args.seed}'
     os.makedirs(outdir, exist_ok=True)
 
+    # # 遍历抑制词索引、保留步骤比例和惩罚比率的组合
     for token_indices in args.token_indices:
         for cross_retain_steps in args.cross_retain_steps:
             for alpha in args.alpha:
                 g_cpu = torch.Generator().manual_seed(args.seed)
                 print(f'|----------Suppress EOT (Generated-Image): token_indices={token_indices}, alpha={alpha}, cross_retain_steps(1-tau)={cross_retain_steps}----------|')
+                # 创建一个AttentionStore控制器，用于控制生成过程中的注意力机制
                 controller = AttentionStore(token_indices, alpha, args.method, cross_retain_steps, n, args.iter_each_step, args.max_step_to_erase,
                                             lambda_retain=args.lambda_retain, lambda_erase=args.lambda_erase, lambda_self_retain=args.lambda_self_retain, lambda_self_erase=args.lambda_self_erase)
+                # 计算tau值，用于后续计算
                 tau = round(1.0 - cross_retain_steps, 3)
                 image_inv, x_t = run_and_display(stable, [prompt], controller, latent=None, generator=g_cpu, uncond_embeddings=None, verbose=False)
                 print("showing from left to right: the ground truth image, the suppressed image")
@@ -449,6 +490,8 @@ def main_gen(args, stable):
                 # show_cross_attention(stable, prompt, controller, 16, ["up", "down"], save_name=f'{outdir}/soft-weight{alpha}-tau{tau}-token_idx{token_indices}-attn')
 
 if __name__=="__main__":
+    # os.environ["http_proxy"] = "http://127.0.0.1:7890"
+    # os.environ["https_proxy"] = "http://127.0.0.1:7890"
     args = parse_args()
     stable = load_model(args.sd_version)
     if args.type == 'Real-Image':
